@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255, 59, 92, 0.12), transparent),
+      radial-gradient(ellipse 60% 40% at 90% 10%, rgba(23, 233, 182, 0.08), transparent);
+    background-attachment: fixed;
+  }
+  h1, h2, h3, h4 {
+    font-family: theme("fontFamily.display");
+    letter-spacing: -0.02em;
+  }
+  ::selection {
+    background: theme("colors.signal.DEFAULT");
+    color: white;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-ink-850/80 border border-ink-700 rounded-2xl backdrop-blur-sm;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-signal px-6 py-3.5 font-display font-semibold text-white shadow-glow transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-ink-600 bg-ink-800 px-5 py-3 font-medium text-white/90 transition-colors hover:bg-ink-700 active:scale-[0.98];
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-white/60 transition-colors hover:text-white hover:bg-ink-800;
+  }
+  .label-eyebrow {
+    @apply font-mono text-[11px] uppercase tracking-[0.18em] text-white/40;
+  }
+  .rec-dot {
+    @apply h-2 w-2 rounded-full bg-signal animate-pulseDot;
+  }
+}
