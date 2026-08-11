@@ -1,0 +1,15 @@
+{
+  "name": "clipforge-backend",
+  "version": "1.0.0",
+  "description": "ClipForge API — job queue + AI pipeline orchestration for automatic YouTube-to-shorts clipping",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
