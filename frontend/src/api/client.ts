@@ -1,4 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+import { auth } from "../lib/firebase";
 
 export type CountMode = "auto" | "5" | "10" | "15" | "20";
 
@@ -44,10 +45,12 @@ export interface ClipScores {
   hook: number;
   engagement: number;
   emotional: number;
+  information: number;
   clarity: number;
   standalone: number;
+  story: number;
   retention: number;
-  overall: number;
+  shareability: number;
 }
 
 export interface ClipSettings {
@@ -67,7 +70,13 @@ export interface Clip {
   endTime: number;
   duration: number;
   scores: ClipScores;
+  viralScore: number;
+  title: string;
   hookLine: string;
+  description: string;
+  topic: string;
+  tone: string;
+  reason: string;
   tags: string[];
   settings: ClipSettings;
   qc: { passed: boolean } | null;
@@ -93,8 +102,12 @@ export interface ProjectSummary {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const idToken = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+    },
     ...options,
   });
   if (!res.ok) {
@@ -102,6 +115,35 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(body.error || `Request failed (${res.status})`);
   }
   return res.json();
+}
+
+/**
+ * Video/zip endpoints are auth-protected server-side, but a plain <a href>
+ * or <video src> can't attach an Authorization header — so these fetch the
+ * file as an authenticated request and hand back a blob: URL the browser
+ * can play/download normally. Callers should revoke the URL when done
+ * (e.g. on unmount) to avoid leaking memory.
+ */
+async function fetchAuthedBlobUrl(path: string): Promise<string> {
+  const idToken = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `Could not load file (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+function triggerBrowserDownload(blobUrl: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export const api = {
@@ -124,9 +166,17 @@ export const api = {
 
   deleteProject: (projectId: string) => request<{ deleted: boolean }>(`/projects/${projectId}`, { method: "DELETE" }),
 
-  clipStreamUrl: (projectId: string, clipId: string) => `${API_BASE}/projects/${projectId}/clips/${clipId}/file`,
-  clipDownloadUrl: (projectId: string, clipId: string) => `${API_BASE}/projects/${projectId}/clips/${clipId}/download`,
-  downloadAllUrl: (projectId: string) => `${API_BASE}/projects/${projectId}/download-all`,
+  loadClipVideoBlobUrl: (projectId: string, clipId: string) => fetchAuthedBlobUrl(`/projects/${projectId}/clips/${clipId}/file`),
+  downloadClip: async (projectId: string, clipId: string, filename: string) => {
+    const url = await fetchAuthedBlobUrl(`/projects/${projectId}/clips/${clipId}/download`);
+    triggerBrowserDownload(url, filename);
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  },
+  downloadAll: async (projectId: string, filename: string) => {
+    const url = await fetchAuthedBlobUrl(`/projects/${projectId}/download-all`);
+    triggerBrowserDownload(url, filename);
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  },
 
   updateClipSettings: (projectId: string, clipId: string, settings: Partial<ClipSettings>) =>
     request<Clip>(`/projects/${projectId}/clips/${clipId}`, { method: "PATCH", body: JSON.stringify({ settings }) }),
