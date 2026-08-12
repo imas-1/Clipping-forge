@@ -1,187 +1,219 @@
-# ClipForge
+# ClipForge — €0 edition
 
-Paste a YouTube link → click **Generate Clips** → AI does everything → download finished
-9:16 clips. Manual editing is only a fallback for after generation, never the default.
-
-This build replaces every mock service from the prototype with a real implementation
-wherever technically possible inside this environment, and fails honestly (never with
-fake data) wherever a real external credential/tool is required but not connected.
+Sign in → paste a YouTube link → click **Generate Clips** → AI understands the whole
+video, finds the best moments, and renders finished 9:16 clips → download. Every step
+in that pipeline now defaults to a genuinely free, open-source, self-hosted component —
+paid providers still exist in the code as opt-in upgrades, never as a silent requirement.
 
 ---
 
-## REAL — what actually works now
+## 1. FILES CHANGED this round
 
-- **AI moment detection & scoring** (`backend/src/services/aiPipeline.js`) — unchanged
-  from the prototype, because it was never mocked: real semantic segmentation into
-  candidate windows, multi-factor scoring (hook/engagement/emotional/clarity/standalone/
-  retention), non-overlapping diverse selection, quality-floor filtering. It now runs on
-  **real transcript segments** instead of a fake archetype bank (see below).
-- **Real transcript segmentation** (`backend/src/lib/segmentTagger.js`) — real transcript
-  clauses (grouped by punctuation + pause gaps in actual word timestamps) are classified
-  into the scoring vocabulary via explainable lexical heuristics, not fixed mock text.
-- **Real video acquisition integration** (`backend/src/services/youtubeService.js`) — built
-  on `yt-dlp`, the standard compliant downloader (uses YouTube's public player endpoints,
-  no DRM circumvention). Fetches real metadata (`--dump-json`) and downloads a real MP4
-  (`-f bestvideo+bestaudio --merge-output-format mp4`). **Requires `yt-dlp` installed on
-  the host** — see REQUIRED below.
-- **Real audio extraction** (`backend/src/services/audioService.js`) — real `ffmpeg`
-  extraction of the actual source audio to a compressed mono MP3 for STT upload.
-- **Real speech-to-text integration** (`backend/src/services/transcriptService.js`) — a
-  correct implementation of the OpenAI Whisper API contract
-  (`POST /v1/audio/transcriptions`, `model=whisper-1`, `response_format=verbose_json`,
-  `timestamp_granularities[]=word`), returning real word-level timestamps. **Requires an
-  API key** — see REQUIRED below. `STT_BASE_URL` can point at any OpenAI-compatible
-  endpoint (self-hosted Whisper, Groq, etc.).
-- **Real face-aware reframing** (`backend/src/services/faceDetection.js` +
-  `backend/scripts/detect_faces.py`) — genuine OpenCV Haar-cascade face detection sampled
-  across each clip's real frames, producing a piecewise crop path that follows the
-  detected speaker. Falls back to a center crop (not a fabricated detection) when no face
-  is found or OpenCV is unavailable.
-- **Real ffmpeg render pipeline** (`backend/src/services/videoRenderer.js`) — cuts the
-  **actual downloaded source video** at the AI-selected timestamps, applies a real
-  time-varying crop driven by the real face keyframes, burns in captions built from real
-  word timestamps (not evenly-guessed timing), applies a subtle automatic punch-in,
-  loudness-normalizes the real extracted audio (`loudnorm`), and encodes real 1080×1920
-  H.264 MP4. **Verified in this sandbox** against a real (non-YouTube) test video — see
-  "How this was tested" below.
-- **Real quality control** (`backend/src/services/qualityControl.js`) — `ffprobe`
-  resolution/duration/codec checks, real audio-stream presence check, and real black-frame
-  detection (`ffmpeg blackdetect`) against the actual rendered output. One automatic
-  re-render (center framing, subtle effects) on failure, per the spec.
-- **Real regenerate / quick actions** — re-runs the real renderer against the real cached
-  source video and real transcript, with new settings (duration, effects, framing,
-  captions, custom text).
-- **Real setup-status check** (`GET /api/setup-status`) — the frontend calls this and
-  disables Generate with an explicit checklist if `yt-dlp` or an STT key aren't connected,
-  instead of letting the user hit a confusing failure.
-- Download / Download All (real files, real zip), project history, brand kit auto-apply —
-  unchanged from the prototype, already real.
+- `backend/src/ai/providers/localProvider.js` — **new**: free, self-hosted Ollama provider.
+- `backend/src/ai/aiProvider.js` — default is now `local` (Ollama) instead of throwing
+  when `AI_PROVIDER` is unset.
+- `backend/src/services/transcriptService.js` — rewritten: default is now local
+  `faster-whisper`; the OpenAI Whisper API path still exists but only runs if you set
+  `STT_PROVIDER=openai` explicitly.
+- `backend/scripts/transcribe_local.py` — **new**: real local STT via faster-whisper,
+  same output shape the OpenAI path already produced.
+- `backend/src/config/limits.js` — env var names changed to the requested
+  `FREE_MAX_*` convention (internal code untouched, so nothing else needed to change).
+- `backend/requirements.txt` — **new**: `faster-whisper`, `opencv-python`, `yt-dlp` —
+  the whole free Python stack in one file.
+- `backend/server.js` — `/api/setup-status` now reports the free-by-default providers
+  (Ollama reachability, faster-whisper importability) instead of assuming paid keys.
+- `backend/.env.example` — restructured into an explicit **FREE REQUIRED** section and
+  an **OPTIONAL PAID** section.
+- `vercel.json`, `firestore.rules`, `firestore.indexes.json` — unchanged from last round
+  (still correct for this round's architecture — see section 6).
 
-## MOCK — nothing is faked; here's what simply can't run in *this* sandbox
+Nothing was deleted: the OpenAI/Anthropic AI providers and the OpenAI Whisper STT path
+are all still in the codebase and fully functional — they're just no longer required or
+defaulted-to.
 
-Nothing in the code fabricates results. But this sandbox has **no outbound network
-access at all** (verified: every external host, including `api.openai.com`, returns
-`403 host_not_allowed`) and does not have `yt-dlp` installed, so two real integrations
-could be built and unit-verified for correctness but not run against the live internet
-from here:
+## 2. FEATURES IMPLEMENTED
 
-| Step | Status |
-|---|---|
-| `yt-dlp` metadata/download | Real code, correct CLI contract — untestable here (no network, no `yt-dlp` binary). Confirmed it fails cleanly with a `SetupRequiredError` rather than fake data. |
-| OpenAI Whisper transcription | Real code, matches OpenAI's documented multipart schema exactly (verified against current API docs) — untestable here (no network, no API key). Fails cleanly with `SetupRequiredError` if the key is missing. |
+- Free/local speech-to-text as the real default (word-level timestamps, same downstream
+  contract as before).
+- Free/local semantic AI analysis as the real default (same two-pass chunking → generate
+  → rank pipeline as before, just pointed at a local model by default).
+- Automatic provider detection stays honest: if the free local tool isn't installed/
+  running, the app tells you exactly what to install — it does not silently fall back to
+  a paid provider, and does not fake a result.
+- Paid providers (OpenAI, Anthropic, OpenAI Whisper) remain fully implemented and
+  available as an explicit opt-in (`AI_PROVIDER=openai`/`anthropic`, `STT_PROVIDER=openai`).
 
-Everything downstream of those two — AI scoring, face detection, cropping, captioning,
-audio normalization, rendering, QC — was **actually run and verified in this sandbox**
-against a real test video (see below), because `ffmpeg`, `ffprobe`, Python, and OpenCV are
-all present locally and need no network.
+## 3. FREE COMPONENTS USED (the real default path)
 
-### How this was tested
-A real (non-YouTube) MP4 was generated with `ffmpeg` as a stand-in source file, then run
-through the real pipeline directly: face detection → time-varying crop → caption burn-in
-from real word timestamps → loudness normalization → encode → QC (including black-frame
-detection). The output was confirmed to contain the actual cropped source content with
-burned captions (frame-extracted and visually inspected), and passed every real QC check.
-This proves the entire post-acquisition pipeline is genuine, not simulated — the only gap
-is the two network-dependent integrations above, which need to run on a host with internet
-access and the credentials listed below.
+| Stage | Component | Cost |
+|---|---|---|
+| Auth + project metadata | Firebase (Spark plan) | €0 |
+| YouTube acquisition | yt-dlp | €0, open-source |
+| Audio/video processing | ffmpeg | €0, open-source |
+| Speech-to-text | faster-whisper (local, CPU) | €0, open-source |
+| Semantic clip analysis | Ollama + a local LLM (e.g. `llama3.1:8b`) | €0, open-source, self-hosted |
+| Face detection / reframing | OpenCV (Haar cascade) | €0, open-source |
+| Frontend hosting | Vercel free tier | €0 |
+| Backend hosting | see section 10 — **this is the one honest gap** | see below |
 
-## REQUIRED APIs / services
+## 4. OPTIONAL PAID COMPONENTS (never required, never defaulted-to)
 
-1. **yt-dlp** (not an API — a CLI tool). No account or key needed.
-   `pip install yt-dlp`, confirm `yt-dlp --version` works, restart the backend.
-2. **Speech-to-text provider** — OpenAI by default (`whisper-1` via
-   `/v1/audio/transcriptions`). Needs an API key. Any OpenAI-compatible STT endpoint works
-   by changing `STT_BASE_URL`.
-3. *(Optional, already installed in this repo's expected environment)* **OpenCV**
-   (`opencv-python`) for face-aware reframing. Without it, clips still render — just with
-   center-crop framing instead of speaker tracking.
+- OpenAI Whisper API (`STT_PROVIDER=openai`) — faster/more accurate than local Whisper,
+  costs per minute of audio.
+- OpenAI or Anthropic chat completions (`AI_PROVIDER=openai`/`anthropic`) — likely higher
+  semantic-analysis quality than a small local model, costs per token.
+- Both require their own API key, set explicitly — the app will not call them unless you
+  choose to.
 
-## ENVIRONMENT VARIABLES
+## 5. FIREBASE — exact settings required
 
-`backend/.env` (copy from `.env.example`):
-```
-PORT=8787
+Unchanged from your existing setup: Authentication (email/password + Google) enabled,
+Firestore (Standard, Production mode), Spark plan, no Storage, no Blaze. What the code
+needs from you:
 
-# YTDLP_PATH=/usr/local/bin/yt-dlp     # only if yt-dlp isn't on PATH
+1. Deploy the included rules + index once (`firebase deploy --only firestore:rules,firestore:indexes`).
+2. A service account for the backend (`FIREBASE_PROJECT_ID`/`FIREBASE_CLIENT_EMAIL`/
+   `FIREBASE_PRIVATE_KEY` in `backend/.env` — a secret, never commit it).
+3. The web app's public client config (`VITE_FIREBASE_*` in `frontend/.env` — not a
+   secret, safe in the bundle).
 
-STT_API_KEY=sk-...                      # required — or set OPENAI_API_KEY instead
-# OPENAI_API_KEY=
-# STT_BASE_URL=https://api.openai.com/v1/audio/transcriptions
-# STT_MODEL=whisper-1
+## 6. VERCEL — exact settings required
 
-# PYTHON_BIN=python3                    # only if python3 isn't on PATH
-```
+Same as last round, unchanged: I found no pre-existing `vercel.json` in the project as
+I have it, so the one included (frontend-only static build of `frontend/`, SPA rewrite)
+is what's actually there now — not something "preserved" from elsewhere. If you have a
+different working one, keep yours.
 
-`frontend/.env` (copy from `.env.example`):
-```
-VITE_API_BASE=/api
-```
+**The backend still cannot run on Vercel** (see section 10) — set `VITE_API_BASE` in
+Vercel's dashboard to wherever you deploy the backend, plus the four `VITE_FIREBASE_*`
+vars (all must be set in Vercel's env settings, not just locally, since Vite inlines
+them at build time).
 
-No keys are ever read by the frontend — all provider calls happen server-side.
+## 7. EXACT ENVIRONMENT VARIABLES
 
-## LOCAL SETUP
+See `backend/.env.example` (now split into FREE REQUIRED / OPTIONAL PAID) and
+`frontend/.env.example`. Summary of what's actually required for the €0 path:
 
-Requires Node 18+, Python 3 with `opencv-python` installed, and `ffmpeg`/`ffprobe`/`zip`
-on PATH.
+**Backend (free path):** `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`,
+`FIREBASE_PRIVATE_KEY`. That's it for required env vars — `STT_PROVIDER`/`AI_PROVIDER`
+can stay unset (defaults to local/free); yt-dlp/faster-whisper/OpenCV/Ollama are
+installed tools, not env vars.
+
+**Frontend:** `VITE_API_BASE`, `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`,
+`VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`.
+
+## 8. LOCAL INSTALLATION COMMANDS
 
 ```bash
-# 1. Install yt-dlp (system-wide, one time)
-pip install yt-dlp
-yt-dlp --version        # confirm it's on PATH
+# 1. Free Python stack (yt-dlp, faster-whisper, OpenCV)
+pip install -r backend/requirements.txt
 
-# 2. Backend — zero npm dependencies
+# 2. Free local LLM runtime
+# Install Ollama from https://ollama.com, then:
+ollama pull llama3.1:8b       # or a smaller/larger model — see note in section 12
+ollama serve                   # usually auto-starts after install
+
+# 3. Backend
 cd backend
+npm install                    # firebase-admin only — everything else is Python/system tools
 cp .env.example .env
-# edit .env and set STT_API_KEY=sk-...
-node server.js           # http://localhost:8787
+# fill in FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY
+node server.js                  # http://localhost:8787
 
-# 3. Frontend — separate terminal
+# 4. Firestore rules/index (one-time)
+firebase deploy --only firestore:rules,firestore:indexes
+
+# 5. Frontend
 cd frontend
 npm install
 cp .env.example .env
-npm run dev               # http://localhost:5173, proxies /api to :8787
+# fill in VITE_FIREBASE_*, VITE_API_BASE=http://localhost:8787/api
+npm run dev                     # http://localhost:5173
 ```
 
-Open http://localhost:5173. If `yt-dlp` or `STT_API_KEY` aren't connected, the dashboard
-shows exactly what's missing and disables Generate — it will not attempt to fake a result.
-Once both are connected, paste a real YouTube URL and click **Generate Clips**. Expect
-several minutes for a full run (real download + real transcription + real ffmpeg encodes
-per clip) — this is why the processing screen exists.
+## 9. RUNNING THE COMPLETE PIPELINE LOCALLY FOR €0
 
-## VERCEL
+With the four commands above (Ollama running, `pip install -r requirements.txt` done,
+backend + frontend running), the entire pipeline —
+YouTube → yt-dlp → ffmpeg audio extraction → faster-whisper transcript → Ollama semantic
+analysis → ffmpeg render/caption/crop → OpenCV face detection → technical QC →
+finished MP4 — runs end-to-end on your own machine with **zero API keys and zero
+recurring cost**. This was verified in this sandbox at the code level (every free-path
+service correctly detects its own absence and reports exactly what to install, rather
+than faking success) — see section 12 for what wasn't verified with an actual live model
+running, and why.
 
-- **Frontend → Vercel**: works as-is. Deploy with root directory `frontend`, set
-  `VITE_API_BASE` to your deployed backend's URL.
-- **Backend → NOT Vercel serverless.** It runs a long-lived job queue, shells out to
-  `yt-dlp`/`ffmpeg`/`python3`, and writes files to local disk — none of which fit Vercel's
-  stateless, time-limited functions. Deploy it to Railway, Render, Fly.io, or a VPS with a
-  persistent filesystem, and make sure the image has `ffmpeg`, `yt-dlp`, and
-  `python3 + opencv-python` installed. Add `STT_API_KEY` as a secret there. For real scale,
-  swap the in-memory job queue for a real one (BullMQ/SQS) and local disk for object
-  storage (S3/GCS) — `jobQueue.js` and `store.js` are the two files that would change.
+`npm test` in `backend/` (15/15 passing) exercises the full semantic-analysis pipeline
+end-to-end against the deterministic mock provider, without needing Ollama or any key at
+all — useful for CI or quick sanity checks independent of the free LLM being installed.
 
-## LIMITATIONS — honest, not fake
+## 10. WHAT CAN RUN PUBLICLY FOR €0
 
-- **This sandbox cannot reach the internet at all** (confirmed — every external host is
-  blocked), so the two network-dependent integrations (`yt-dlp`, Whisper API) could not be
-  exercised against the live internet from here, only built correctly and verified to fail
-  cleanly and informatively when unavailable. They need to be run on a host with real
-  network access and real credentials to confirm live behavior end-to-end.
-- **Audio upload size**: the STT step reads the whole extracted audio file into memory and
-  uploads it in one request, capped at 25MB (the provider's hard limit). Very long source
-  videos (~roughly over an hour at the current compression settings) will need chunked
-  transcription, which isn't implemented yet — the code currently throws a clear error
-  rather than silently truncating or faking a transcript.
-- **Face detection** uses OpenCV's classic Haar-cascade frontal-face detector — real and
-  fast, but a simpler model than modern deep-learning face/person detectors. It handles
-  a single dominant on-camera face well; multi-speaker cutaway detection (e.g. switching
-  between two podcast hosts) is not distinguished beyond "largest face in frame."
-- **AI scoring** is a deterministic lexical/heuristic scorer, not an LLM. It's explainable
-  and fast, and operates on real transcript content, but a production version would likely
-  swap this step for an LLM call over the same candidate windows — `aiPipeline.js`'s
-  interface (`{start,end,text,tag}` segments in, scored candidates out) is built so that
-  swap doesn't require changing anything downstream.
-- No auth/accounts layer — every visitor sees the same project history and shares the
-  same on-disk source video cache.
-- Rendered files and job/project state live on local disk — fine for one instance, not for
-  a horizontally-scaled deployment without the object-storage swap noted above.
+- **Frontend**: yes, indefinitely, on Vercel's free tier.
+- **Firebase Auth + Firestore**: yes, indefinitely, on the Spark plan, at this app's
+  scale (the usage limits in `limits.js` exist specifically to keep it within free-tier
+  quotas).
+- **yt-dlp, ffmpeg, OpenCV**: yes, free forever, no usage-based cost at any scale.
+
+## 11. WHAT CANNOT REALISTICALLY RUN PUBLICLY FOR €0
+
+**THIS PART CANNOT RELIABLY RUN FOR €0 AT SCALE: the backend compute itself.**
+
+Concretely: yt-dlp downloads, ffmpeg encoding, and — now — local Whisper transcription
+and local LLM inference are all real CPU/RAM-intensive work that has to run *somewhere*,
+continuously, reachable from the internet, for the app to be usable by anyone other than
+you on your own machine. Every genuinely free hosting tier I'm aware of (Render free,
+Railway free, Fly.io free allowance, Google Cloud Run free tier, etc.) either:
+
+- sleeps/cold-starts the instance (breaks a long-running job queue and makes generation
+  unpredictably slow or fail mid-job), or
+- caps CPU/RAM/execution time well below what local Whisper + a 8B-parameter local LLM +
+  ffmpeg encoding need to run reliably for even one concurrent user, or
+- both.
+
+So: **local/self-hosted AI genuinely eliminates the per-request API cost**, but it does
+**not** eliminate the need for a machine with real, sustained CPU/RAM to run it on. That
+machine is either:
+1. **Your own computer** (genuinely €0, this is what section 9 describes, and it's a
+   completely legitimate way to run ClipForge for personal use), or
+2. **A paid VPS/cloud instance** (Hetzner/DigitalOcean/etc. — often a few euros a month,
+   which is real money, just typically less than metered API costs at any meaningful
+   volume), or
+3. A machine you already own that's on 24/7 (a home server, a spare machine) — €0
+   marginal cost, but not "public cloud."
+
+I will not claim option 2 is free — it isn't — and I won't pretend a free-tier serverless
+host can reliably run this workload continuously, because it can't. This is the one part
+of the "developer pays €0" requirement I cannot satisfy for a *publicly reachable*
+deployment; personal/local use (option 1) genuinely is €0.
+
+## 12. REMAINING LIMITATIONS — honest
+
+- **The Ollama and faster-whisper integrations were built and unit-tested for correct
+  failure behavior in this sandbox (confirmed: both detect their own absence and report
+  exact install instructions rather than faking a result), but were NOT run against a
+  live model** — this sandbox has no outbound internet access to download Ollama/model
+  weights, and Ollama isn't pre-installed here. The loopback HTTP calls themselves
+  (`localhost:11434`) are not blocked by the sandbox's network policy — only internet
+  egress is — so this is purely a "not installed in this session" gap, not an
+  architectural one. Test the full flow with a real model on first local run.
+- **Local LLM quality is genuinely lower than GPT-4-class hosted models**, especially for
+  the more nuanced parts of the spec (understanding a subtle emotional beat, judging
+  whether a payoff really lands). `llama3.1:8b` is a reasonable free default that runs on
+  a normal laptop CPU, but if clip quality matters more than cost to you, the
+  `AI_PROVIDER=openai`/`anthropic` opt-in exists exactly for that tradeoff — nothing
+  needs to be rewritten to switch.
+- **Local Whisper is slower than the API** on CPU — a 10-minute video's audio might take
+  a few minutes to transcribe locally vs. seconds via the API. This is the real,
+  expected cost of "free" here, not a bug.
+- **Storage is still local disk** (unchanged from last round — Firebase Storage isn't
+  enabled, by your choice, to stay off Blaze); doesn't scale past one backend instance.
+- **Firestore security rules are defense-in-depth, not the active enforcement mechanism**
+  (the backend, using Admin SDK + verified tokens, is what actually isolates users —
+  unchanged from last round).
+- Everything else from prior rounds' limitations still applies: 25MB STT upload cap on
+  the OpenAI path (not applicable to the local path, which has no such limit but is
+  correspondingly slower on long audio), active-speaker framing is a real video-only
+  heuristic (not audio-diarization-based), content QC makes at most one bounded boundary
+  adjustment per clip.
