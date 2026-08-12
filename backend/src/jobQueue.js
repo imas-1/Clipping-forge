@@ -7,10 +7,12 @@ const { SetupRequiredError } = require("./lib/errors");
 const { fetchVideoInfo, downloadSource } = require("./services/youtubeService");
 const { extractAudio } = require("./services/audioService");
 const { transcribeAudio } = require("./services/transcriptService");
-const { analyzeTranscript } = require("./services/aiPipeline");
+const { analyzeTranscript, runContentQualityCheck, generateAllCandidates, rankAndSelect } = require("./services/semanticAnalysis");
 const { detectFaceKeyframes } = require("./services/faceDetection");
 const { renderClip } = require("./services/videoRenderer");
 const { checkRenderedClip } = require("./services/qualityControl");
+const { LIMITS } = require("./config/limits");
+const firestoreStore = require("./lib/firestoreStore");
 
 const DATA_DIR = path.join(__dirname, "..", "data");
 const jobsStore = new Store(path.join(DATA_DIR, "jobs"));
@@ -23,8 +25,9 @@ const PIPELINE_STEPS = [
   { key: "acquire_source", label: "Retrieving source video" },
   { key: "extract_audio", label: "Extracting audio" },
   { key: "transcript", label: "Transcribing speech" },
-  { key: "moments", label: "Finding best moments" },
-  { key: "ranking", label: "Ranking clips" },
+  { key: "moments", label: "AI understanding the video" },
+  { key: "ranking", label: "Ranking & diversifying clips" },
+  { key: "content_qc", label: "AI reviewing clip boundaries" },
   { key: "rendering", label: "Cutting & reframing clips" },
   { key: "captions", label: "Generating captions" },
   { key: "quality", label: "Quality checking" },
@@ -99,24 +102,54 @@ async function runPipeline(jobId) {
   try {
     updateJob(jobId, { status: "processing" });
     const job = jobsStore.get(jobId);
-    const { url, countMode, brandKit } = job.params;
+    const { url, countMode, brandKit, userId } = job.params;
     const projectId = job.projectId;
     const projectDir = path.join(SOURCES_DIR, projectId);
 
     const videoInfo = await step(jobId, "fetch_info", () => fetchVideoInfo(url));
+
+    if (videoInfo.durationSeconds > LIMITS.MAX_SOURCE_VIDEO_SECONDS) {
+      const maxMinutes = Math.round(LIMITS.MAX_SOURCE_VIDEO_SECONDS / 60);
+      throw new Error(
+        `This video is ${Math.round(videoInfo.durationSeconds / 60)} minutes long, which is over the current ${maxMinutes}-minute limit for this deployment.`
+      );
+    }
+
+    // Firestore doc created early (status: "processing") so it shows up in the user's
+    // project history immediately, not only once rendering finishes.
+    if (userId) {
+      await firestoreStore.createProjectDoc(projectId, {
+        userId,
+        title: videoInfo.title,
+        thumbnailUrl: videoInfo.thumbnailUrl,
+        sourceUrl: url,
+        clipCount: 0,
+        status: "processing",
+      });
+    }
+
     const sourcePath = await step(jobId, "acquire_source", () => downloadSource(url, projectDir));
     const audioPath = await step(jobId, "extract_audio", () =>
       extractAudio(sourcePath, path.join(projectDir, "audio.mp3"))
     );
     const transcript = await step(jobId, "transcript", () => transcribeAudio(audioPath));
 
-    const moments = await step(jobId, "moments", () => analyzeTranscript(transcript, countMode));
-    const ranked = await step(jobId, "ranking", () => [...moments].sort((a, b) => b.scores.overall - a.scores.overall));
+    const moments = await step(jobId, "moments", () => generateAllCandidates(transcript));
+    const ranked = await step(jobId, "ranking", () => rankAndSelect(moments, countMode, transcript.words));
+
+    const reviewed = await step(jobId, "content_qc", async () => {
+      const out = [];
+      for (const m of ranked) {
+        const { candidate } = await runContentQualityCheck(m, transcript.words);
+        out.push(candidate);
+      }
+      return out;
+    });
 
     const clips = [];
     await step(jobId, "rendering", async () => {
       let i = 0;
-      for (const moment of ranked) {
+      for (const moment of reviewed) {
         i++;
         const clipId = id("clip");
         const outputPath = path.join(RENDERS_DIR, projectId, `${clipId}.mp4`);
@@ -142,6 +175,9 @@ async function runPipeline(jobId) {
           captionStyle: settings.captionStyle,
           watermarkText: renderCfg.watermarkText,
           customText: null,
+          tone: moment.tone,
+          scores: moment.scores,
+          accentColor: brandKit?.accentColor,
         });
 
         clips.push({
@@ -151,7 +187,13 @@ async function runPipeline(jobId) {
           endTime: moment.endTime,
           duration: moment.duration,
           scores: moment.scores,
+          viralScore: moment.viralScore,
+          title: moment.title,
           hookLine: moment.hookLine,
+          description: moment.description,
+          topic: moment.topic,
+          tone: moment.tone,
+          reason: moment.reason,
           tags: moment.tags,
           filePath: outputPath,
           faceKeyframes: keyframes,
@@ -190,6 +232,7 @@ async function runPipeline(jobId) {
 
     const project = {
       id: projectId,
+      userId: userId || null,
       videoInfo,
       countMode,
       brandKit: brandKit || null,
@@ -199,11 +242,24 @@ async function runPipeline(jobId) {
       createdAt: job.createdAt,
       updatedAt: new Date().toISOString(),
       title: videoInfo.title,
+      status: "completed",
     };
     projectsStore.save(project.id, project);
 
+    if (userId) {
+      await firestoreStore.updateProjectDoc(projectId, {
+        clipCount: clips.length,
+        status: "completed",
+        thumbnailUrl: videoInfo.thumbnailUrl,
+      });
+    }
+
     updateJob(jobId, { status: "completed", progress: 100, projectId: project.id });
   } catch (err) {
+    const job = jobsStore.get(jobId);
+    if (job?.params?.userId) {
+      await firestoreStore.updateProjectDoc(job.projectId, { status: "failed" }).catch(() => {});
+    }
     if (err instanceof SetupRequiredError) {
       updateJob(jobId, {
         status: "failed",
@@ -231,6 +287,13 @@ function getJob(jobId) {
   return jobsStore.get(jobId);
 }
 
+function countActiveJobsForUser(userId) {
+  if (!userId) return 0;
+  return jobsStore
+    .all()
+    .filter((j) => j.params?.userId === userId && (j.status === "queued" || j.status === "processing")).length;
+}
+
 module.exports = {
   createJob,
   getJob,
@@ -240,5 +303,6 @@ module.exports = {
   SOURCES_DIR,
   applyBrandKit,
   defaultClipSettings,
+  countActiveJobsForUser,
   id,
 };
