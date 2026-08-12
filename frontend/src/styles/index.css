@@ -6,6 +6,23 @@
   html {
     color-scheme: dark;
   }
+  /* Root-cause safety net: nothing in this app should ever need horizontal
+     page scroll. Real overflow culprits (fixed widths, missing min-w-0 on
+     flex children, unconstrained media) are fixed at the source in each
+     component — this is a backstop, not a cover-up, so a future regression
+     degrades to "content clipped" instead of "whole page swipes sideways". */
+  html,
+  body,
+  #root {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  img,
+  video {
+    max-width: 100%;
+    height: auto;
+  }
   body {
     background-image:
       radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255, 59, 92, 0.12), transparent),
