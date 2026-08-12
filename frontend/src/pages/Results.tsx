@@ -28,16 +28,47 @@ function formatDuration(seconds: number) {
 }
 
 function ClipCard({ project, clip, onEdit }: { project: Project; clip: Clip; onEdit: () => void }) {
-  const [showVideo, setShowVideo] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [loadingVideo, setLoadingVideo] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+    };
+  }, [videoUrl]);
+
+  async function handleWatch() {
+    if (videoUrl) return;
+    setLoadingVideo(true);
+    try {
+      const url = await api.loadClipVideoBlobUrl(project.id, clip.id);
+      setVideoUrl(url);
+    } catch {
+      /* surfaced implicitly by staying on the thumbnail state */
+    } finally {
+      setLoadingVideo(false);
+    }
+  }
+
+  async function handleDownload() {
+    setDownloading(true);
+    try {
+      await api.downloadClip(project.id, clip.id, `${(project.title || "clip").replace(/[^a-z0-9]+/gi, "-")}-${clip.rank}.mp4`);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
     <div className="card overflow-hidden animate-rise">
       <div className="relative aspect-[9/16] bg-ink-900">
-        {showVideo ? (
-          <video src={api.clipStreamUrl(project.id, clip.id)} controls autoPlay className="h-full w-full object-cover" />
+        {videoUrl ? (
+          <video src={videoUrl} controls autoPlay playsInline className="h-full w-full object-cover" />
         ) : (
-          <button onClick={() => setShowVideo(true)} className="group flex h-full w-full flex-col items-center justify-center gap-3">
+          <button onClick={handleWatch} disabled={loadingVideo} className="group flex h-full w-full flex-col items-center justify-center gap-3">
             <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/10 backdrop-blur transition-transform group-hover:scale-105">
-              <Play size={22} className="ml-0.5 text-white" fill="white" />
+              {loadingVideo ? <Loader2 size={20} className="animate-spin text-white" /> : <Play size={22} className="ml-0.5 text-white" fill="white" />}
             </div>
             <span className="px-6 text-center text-sm text-white/60">{clip.hookLine}</span>
           </button>
@@ -46,27 +77,36 @@ function ClipCard({ project, clip, onEdit }: { project: Project; clip: Clip; onE
           #{clip.rank}
         </div>
         <div className="absolute right-3 top-3">
-          <ScoreRing score={clip.scores.overall} />
+          <ScoreRing score={clip.viralScore} />
         </div>
       </div>
 
       <div className="p-4">
         <div className="flex items-center justify-between text-xs text-white/40">
           <span className="font-mono">{formatDuration(clip.duration)}</span>
-          <span>AI score {clip.scores.overall}/100</span>
+          <span>Viral score {clip.viralScore}/100</span>
         </div>
-        <p className="mt-2 line-clamp-2 text-sm text-white/75">“{clip.hookLine}”</p>
+        <p className="mt-2 line-clamp-1 text-sm font-semibold text-white/90">{clip.title}</p>
+        <p className="mt-1 line-clamp-2 text-sm text-white/60">“{clip.hookLine}”</p>
+        {clip.reason && <p className="mt-1.5 line-clamp-2 text-xs text-white/35">{clip.reason}</p>}
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {clip.tags.filter(Boolean).map((t) => (
+            <span key={t} className="rounded-full border border-ink-700 px-2 py-0.5 text-[10px] capitalize text-white/45">
+              {t}
+            </span>
+          ))}
+        </div>
 
         <div className="mt-4 flex gap-2">
-          <button onClick={() => setShowVideo(true)} className="btn-secondary flex-1 !py-2.5 text-sm">
+          <button onClick={handleWatch} className="btn-secondary flex-1 !py-2.5 text-sm">
             <Play size={14} /> Watch
           </button>
           <button onClick={onEdit} className="btn-secondary !py-2.5 !px-3">
             <Pencil size={14} />
           </button>
-          <a href={api.clipDownloadUrl(project.id, clip.id)} className="btn-secondary !py-2.5 !px-3">
-            <Download size={14} />
-          </a>
+          <button onClick={handleDownload} disabled={downloading} className="btn-secondary !py-2.5 !px-3">
+            {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+          </button>
         </div>
       </div>
     </div>
@@ -220,26 +260,38 @@ export default function Results() {
   const [project, setProject] = useState<Project | null>(null);
   const [editingClip, setEditingClip] = useState<Clip | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
     api.getProject(projectId).then(setProject).catch((e) => setError(e.message));
   }, [projectId]);
 
+  async function handleDownloadAll() {
+    if (!project) return;
+    setDownloadingAll(true);
+    try {
+      await api.downloadAll(project.id, `${(project.title || "clips").replace(/[^a-z0-9]+/gi, "-")}.zip`);
+    } finally {
+      setDownloadingAll(false);
+    }
+  }
+
   if (error) return <div className="mx-auto max-w-md px-6 pt-28 text-center text-white/50">{error}</div>;
   if (!project) return <div className="mx-auto max-w-md px-6 pt-28 text-center text-white/40">Loading…</div>;
 
   return (
-    <div className="mx-auto max-w-6xl px-6 pt-14 pb-24">
+    <div className="mx-auto max-w-6xl px-4 sm:px-6 pt-14 pb-24">
       <div className="mb-10 flex flex-wrap items-end justify-between gap-4">
-        <div>
+        <div className="min-w-0">
           <p className="label-eyebrow mb-2">{project.clips.length} clips ready</p>
           <h1 className="font-display text-3xl font-semibold">Your clips are ready.</h1>
-          <p className="mt-1 text-white/45">From “{project.videoInfo.title}”</p>
+          <p className="mt-1 truncate text-white/45">From "{project.videoInfo.title}"</p>
         </div>
-        <a href={api.downloadAllUrl(project.id)} className="btn-primary">
-          <Download size={16} /> Download All
-        </a>
+        <button onClick={handleDownloadAll} disabled={downloadingAll} className="btn-primary shrink-0">
+          {downloadingAll ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+          Download All
+        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">

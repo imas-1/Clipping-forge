@@ -93,7 +93,7 @@ export default function Dashboard() {
 
         <div className="mt-10 w-full">
           <div className="card flex flex-col gap-2 p-2 sm:flex-row sm:items-center">
-            <div className="flex flex-1 items-center gap-3 rounded-xl px-4 py-3.5">
+            <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl px-4 py-3.5">
               <Link2 size={18} className="shrink-0 text-white/35" />
               <input
                 value={url}
