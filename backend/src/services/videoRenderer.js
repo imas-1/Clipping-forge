@@ -44,16 +44,30 @@ function escapeDrawtext(text) {
   return text.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\u2019").replace(/%/g, "\\%");
 }
 
-/** Real caption cues from real word-level timestamps (clip-relative), not evenly divided guesswork. */
+const EMPHASIS_PATTERN = /\b(\d+%?|million|billion|thousand|never|always|secret|secretly|mistake|huge|massive|insane|shocking|worst|best|first|only|free|nobody|everyone|instantly|literally)\b/i;
+
+function hasEmphasis(text) {
+  return EMPHASIS_PATTERN.test(text);
+}
+
+/** Real caption cues from real word-level timestamps (clip-relative), broken into readable 1-2 line chunks. */
 function buildCaptionCuesFromWords(words, clipStart, clipEnd) {
   const inClip = words.filter((w) => w.start >= clipStart - 0.05 && w.end <= clipEnd + 0.05);
-  const wordsPerCue = 4;
+  const wordsPerLine = 3;
+  const linesPerCue = 2;
+  const wordsPerCue = wordsPerLine * linesPerCue;
   const cues = [];
+
   for (let i = 0; i < inClip.length; i += wordsPerCue) {
     const chunk = inClip.slice(i, i + wordsPerCue);
     if (!chunk.length) continue;
+    const line1 = chunk.slice(0, wordsPerLine).map((w) => w.word);
+    const line2 = chunk.slice(wordsPerLine).map((w) => w.word);
+    const text = line2.length ? `${line1.join(" ")}\n${line2.join(" ")}` : line1.join(" ");
+    const plain = chunk.map((w) => w.word).join(" ");
     cues.push({
-      text: chunk.map((w) => w.word).join(" "),
+      text,
+      emphasis: hasEmphasis(plain),
       start: Math.max(0, chunk[0].start - clipStart),
       end: Math.max(0, chunk[chunk.length - 1].end - clipStart),
     });
@@ -76,7 +90,7 @@ function buildCropXExpr(keyframes, srcWidth, cropWidth) {
   return expr;
 }
 
-function captionFilterChain(cues, inputLabel, outputLabel, style = "bold-pop") {
+function captionFilterChain(cues, inputLabel, outputLabel, style = "bold-pop", accentColor = "0xff3b5c") {
   if (!cues.length) return `[${inputLabel}]null[${outputLabel}]`;
   let chain = `[${inputLabel}]`;
   const parts = [];
@@ -84,15 +98,40 @@ function captionFilterChain(cues, inputLabel, outputLabel, style = "bold-pop") {
     const isLast = i === cues.length - 1;
     const label = isLast ? outputLabel : `cap${i}`;
     const safe = escapeDrawtext(cue.text.toUpperCase());
-    const fontsize = style === "minimal" ? 52 : 64;
+    const fontsize = style === "minimal" ? 50 : 60;
+    // Important words (numbers, superlatives, etc.) render in the accent color instead of white —
+    // real emphasis driven by the actual transcript content, not a random word.
+    const fontcolor = cue.emphasis ? accentColor : "white";
     parts.push(
-      `${chain}drawtext=fontfile=${FONT}:text='${safe}':fontsize=${fontsize}:fontcolor=white:` +
+      `${chain}drawtext=fontfile=${FONT}:text='${safe}':fontsize=${fontsize}:fontcolor=${fontcolor}:line_spacing=6:` +
         `borderw=6:bordercolor=black@0.85:box=1:boxcolor=black@0.35:boxborderw=18:` +
-        `x=(w-text_w)/2:y=h-420:enable='between(t,${cue.start.toFixed(2)},${cue.end.toFixed(2)})'[${label}]`
+        `x=(w-text_w)/2:y=h-440:enable='between(t,${cue.start.toFixed(2)},${cue.end.toFixed(2)})'[${label}]`
     );
     chain = `[${label}]`;
   });
   return parts.join(";");
+}
+
+function toFfmpegColor(hex) {
+  if (!hex) return null;
+  return hex.startsWith("#") ? "0x" + hex.slice(1) : hex;
+}
+
+const TONE_INTENSITY = {
+  funny: 1.14, dramatic: 1.13, surprising: 1.12, controversial: 1.11,
+  emotional: 1.10, reflective: 1.07, informative: 1.05, inspiring: 1.08, neutral: 1.05,
+};
+
+/** Effect strength depends on the AI-assessed tone/emotional intensity of the clip, not a flat setting. */
+function zoomTargetFor(tone, scores, effects) {
+  if (effects === "none") return null;
+  if (effects === "subtle") return 1.05;
+  if (effects === "cinematic") return 1.18;
+  if (effects === "dynamic") return 1.16;
+  // "ai" — content-driven intensity
+  const base = TONE_INTENSITY[tone] || 1.06;
+  const emotionalBoost = ((scores?.emotional ?? 50) - 50) / 500; // small nudge from real emotional score
+  return Math.max(1.02, Math.min(1.2, base + emotionalBoost));
 }
 
 /**
@@ -107,6 +146,8 @@ function captionFilterChain(cues, inputLabel, outputLabel, style = "bold-pop") {
  * @param {"ai"|"none"|"dynamic"|"cinematic"|"subtle"} p.effects
  * @param {string|null} p.watermarkText
  * @param {string|null} p.customText - overrides caption source with a single custom line
+ * @param {string} [p.tone] - AI-assessed tone, drives effect intensity
+ * @param {object} [p.scores] - AI sub-scores, drives effect intensity
  */
 async function renderClip(p) {
   const { sourcePath, outputPath, clipStart, clipEnd, words, framing = "ai", effects = "ai" } = p;
@@ -123,13 +164,13 @@ async function renderClip(p) {
   const xExpr = buildCropXExpr(keyframes, srcW, cropW);
 
   const cues = p.customText
-    ? [{ text: p.customText, start: 0, end: duration }]
+    ? [{ text: p.customText, emphasis: false, start: 0, end: duration }]
     : buildCaptionCuesFromWords(words || [], clipStart, clipEnd);
 
-  const zoomEnabled = effects !== "none";
-  const zoomExpr = zoomEnabled ? `,zoompan=z='min(zoom+0.0006,1.08)':d=1:s=${OUT_WIDTH}x${OUT_HEIGHT}:fps=24` : "";
+  const zoomTarget = zoomTargetFor(p.tone, p.scores, effects);
+  const zoomExpr = zoomTarget ? `,zoompan=z='min(zoom+0.0006,${zoomTarget})':d=1:s=${OUT_WIDTH}x${OUT_HEIGHT}:fps=24` : "";
 
-  const capChain = captionFilterChain(cues, "cropped", "captioned", p.captionStyle);
+  const capChain = captionFilterChain(cues, "cropped", "captioned", p.captionStyle, toFfmpegColor(p.accentColor) || "0xff3b5c");
   const watermarkChain = p.watermarkText
     ? `;[captioned]drawtext=fontfile=${FONT}:text='${escapeDrawtext(p.watermarkText)}':fontsize=28:fontcolor=white@0.55:x=w-text_w-30:y=40[vout]`
     : `;[captioned]null[vout]`;

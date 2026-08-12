@@ -16,6 +16,23 @@ function checkOpenCvAvailable() {
 }
 
 /**
+ * Architecture hook for future audio speaker-diarization. Video-only face
+ * size is a legitimate heuristic (see detect_faces.py) but the reliable
+ * signal for "who is actually talking right now" in a multi-speaker
+ * podcast is audio diarization, not face size. This function is the single
+ * integration point: when a diarization service is wired in (e.g. via
+ * pyannote.audio or a cloud diarization API), it would return
+ * `[{start,end,speakerId}]` segments; this function would then re-pick,
+ * for each face-detection sample, whichever detected face's screen
+ * position corresponds to the diarized active speaker for that timestamp.
+ * Not implemented — no diarization data exists to consume yet, and this
+ * function deliberately does NOT guess a mapping without it.
+ */
+function applyDiarizationHints(keyframes, _diarizationSegments) {
+  return keyframes; // no-op until a real diarization source is connected
+}
+
+/**
  * Real per-frame face detection (see scripts/detect_faces.py). Returns a
  * list of {t, cx} keyframes describing where the detected speaker's face
  * is horizontally across the clip, used to drive a time-varying crop in
